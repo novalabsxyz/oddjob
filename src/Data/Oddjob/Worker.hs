@@ -1,11 +1,11 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Lib
-    ( AlertService
+module Data.Oddjob.Worker
+    ( WorkerService
     , Jobs
-    , startAlertService
-    , stopAlertService
+    , startWorkerService
+    , stopWorkerService
     , setJobs
     ) where
 
@@ -15,26 +15,17 @@ import           Control.Concurrent
 import           Control.Concurrent.Async
 import           Control.Concurrent.STM
 import           Control.Exception
-import           Control.Monad (void, forever)
+import           Control.Monad (void, forever, when)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Control.Monad.State.Strict (MonadState, StateT, evalStateT, get, put)
+import           Control.Monad.State.Strict (MonadState, StateT, evalStateT, get)
 import           Data.Foldable (mapM_)
 import           Data.Monoid ((<>))
 import qualified Data.Map.Strict as Map
 import           Data.Map.Strict ((!))
 import           Data.Set (Set, (\\))
 import qualified Data.Set as Set
-import           Lens.Micro (Getting, Lens', (^.), lens, over)
-
-use :: MonadState s m => Getting a s a -> m a
-use l = do
-    s <- get
-    return (s ^. l)
-
-(%=) :: MonadState s m => Lens' s a -> (a -> a) -> m ()
-l %= f = do
-    s <- get
-    put (over l f s)
+import           Lens.Micro (Lens', (^.), lens)
+import           Lens.Micro.Mtl ((%=), use)
 
 type WorkerHandle = Async ()
 
@@ -42,19 +33,19 @@ type WorkerMap b = Map.Map b WorkerHandle
 
 type Jobs b = Set b
 
-data AlertService b = AlertService
+data WorkerService b = WorkerService
     { _asyncHandle :: Async ()
     , _inputVar:: TMVar (Jobs b)
     } deriving (Eq)
 
-asyncHandle :: Lens' (AlertService b) (Async ())
+asyncHandle :: Lens' (WorkerService b) (Async ())
 asyncHandle = lens _asyncHandle (\s n -> s { _asyncHandle = n })
 
-inputVar :: Lens' (AlertService b) (TMVar (Jobs b))
+inputVar :: Lens' (WorkerService b) (TMVar (Jobs b))
 inputVar = lens _inputVar (\s n -> s { _inputVar = n })
 
 
-data AlertPersistenceState b = AlertPersistenceState
+data WorkerState b = WorkerState
     { _workerMap :: WorkerMap b
     , _updateVar:: TMVar (Jobs b)
     , _diedQueue :: TBQueue b
@@ -62,48 +53,48 @@ data AlertPersistenceState b = AlertPersistenceState
     , _self :: Async ()
     }
 
-workerMap :: Lens' (AlertPersistenceState b) (WorkerMap b)
+workerMap :: Lens' (WorkerState b) (WorkerMap b)
 workerMap = lens _workerMap (\s n -> s { _workerMap = n })
 
-updateVar :: Lens' (AlertPersistenceState b) (TMVar (Jobs b))
+updateVar :: Lens' (WorkerState b) (TMVar (Jobs b))
 updateVar = lens _updateVar (\s n -> s { _updateVar = n })
 
-diedQueue :: Lens' (AlertPersistenceState b) (TBQueue b)
+diedQueue :: Lens' (WorkerState b) (TBQueue b)
 diedQueue = lens _diedQueue (\s n -> s { _diedQueue = n })
 
-runJob :: Lens' (AlertPersistenceState b) (b -> IO ())
+runJob :: Lens' (WorkerState b) (b -> IO ())
 runJob = lens _runJob (\s n -> s { _runJob = n })
 
-self :: Lens' (AlertPersistenceState b) (Async ())
+self :: Lens' (WorkerState b) (Async ())
 self = lens _self (\s n -> s { _self = n })
 
-startAlertService :: Ord b => (b -> IO ()) -> IO (AlertService b)
-startAlertService jobFn = do
+startWorkerService :: Ord b => (b -> IO ()) -> IO (WorkerService b)
+startWorkerService jobFn = do
     updateQ <- newEmptyTMVarIO
     diedQ <- newTBQueueIO 10
     controller <- asyncWithReferenceToSelf $ \me ->
-                    let initial = AlertPersistenceState Map.empty updateQ diedQ jobFn me
+                    let initial = WorkerState Map.empty updateQ diedQ jobFn me
                     in
-                    runAlertPersistence betterSTMImplementation initial
-    return (AlertService controller updateQ)
+                    runWorkerService workerServiceLoop initial
+    return (WorkerService controller updateQ)
 
-stopAlertService :: AlertService a -> IO ()
-stopAlertService service = cancel (service ^. asyncHandle)
+stopWorkerService :: WorkerService a -> IO ()
+stopWorkerService service = cancel (service ^. asyncHandle)
 
-setJobs :: Ord b => AlertService b -> Jobs b -> IO ()
+setJobs :: Ord b => WorkerService b -> Jobs b -> IO ()
 setJobs service jobs = atomically (putTMVar (service ^. inputVar) jobs)
 
-newtype AlertPersistence b a = AlertPersistence
-    { _unAlertPersistenceState :: StateT (AlertPersistenceState b) IO a }
+newtype WS b a = WS
+    { _unWorkerState :: StateT (WorkerState b) IO a }
     deriving ( Functor, Applicative, Monad, MonadIO,
-               MonadState (AlertPersistenceState b)
+               MonadState (WorkerState b)
              )
 
-runAlertPersistence :: AlertPersistence b a -> AlertPersistenceState b -> IO a
-runAlertPersistence s = evalStateT (_unAlertPersistenceState s)
+runWorkerService :: WS b a -> WorkerState b -> IO a
+runWorkerService s = evalStateT (_unWorkerState s)
 
-controlAlertRule :: Ord b => b -> AlertPersistence b ()
-controlAlertRule job = do
+controlJob :: Ord b => b -> WS b ()
+controlJob job = do
     jobFn <- use runJob
     diedQ <- use diedQueue
     worker <- liftIO (asyncFinally
@@ -113,48 +104,52 @@ controlAlertRule job = do
     liftIO (linkChildToParent me worker)
     workerMap %= Map.insert job worker
 
-cancelAlertRule :: Ord b => b -> AlertPersistence b ()
-cancelAlertRule job = do
+cancelJob :: Ord b => b -> WS b ()
+cancelJob job = do
     workerHandle <- (! job) <$> use workerMap
     liftIO (cancel workerHandle)
     workerMap %= Map.delete job
 
-updateRunningState :: Ord b => Jobs b -> AlertPersistence b ()
+updateRunningState :: Ord b => Jobs b -> WS b ()
 updateRunningState needRunning = do
     wMap <- use workerMap
     let currentlyRunning = Set.fromList (Map.keys wMap)
         noLongerNeeded = currentlyRunning \\ needRunning
         notRunning = needRunning \\ currentlyRunning
     liftIO (putStrLn ("cancelling: " <> show (Set.size noLongerNeeded)))
-    mapM_ cancelAlertRule noLongerNeeded
+    mapM_ cancelJob noLongerNeeded
     liftIO (putStrLn ("starting: " <> show (Set.size notRunning)))
-    mapM_ controlAlertRule notRunning
+    mapM_ controlJob notRunning
 
-betterSTMImplementation :: Ord b => AlertPersistence b ()
-betterSTMImplementation = forever $ do
-    reasonToWakeUp <- get >>= liftIO . atomically . alertOnAnything
+workerServiceLoop :: Ord b => WS b ()
+workerServiceLoop = forever $ do
+    reasonToWakeUp <- get >>= liftIO . atomically . wakeupSTM
     case reasonToWakeUp of
         (Left needRunning) ->
             updateRunningState needRunning
         (Right job) -> do
-            liftIO (putStrLn "restarting stopped process")
-            -- this results in an unneeded Async.cancel, but it keeps the code
-            -- nice and clean, and it's innocuous
-            cancelAlertRule job
-            controlAlertRule job
+            wMap <- use workerMap
+            -- Only restart the worker if we're actually suppoed to be
+            -- running it.
+            when (Map.member job wMap) $ do
+                liftIO (putStrLn "restarting stopped process")
+                -- this results in an unneeded Async.cancel, but it keeps the code
+                -- nice and clean, and it's innocuous
+                cancelJob job
+                controlJob job
 
-alertOnAnything :: AlertPersistenceState b -> STM (Either (Jobs b) b)
-alertOnAnything apState =
+wakeupSTM :: WorkerState b -> STM (Either (Jobs b) b)
+wakeupSTM apState =
     -- TODO should we swap the order of these?
-    (Left <$> alertOnNeedRunning (apState ^. updateVar))
+    (Left <$> needRunningSTM (apState ^. updateVar))
         `orElse`
-    (Right <$> alertOnStoppedWithException (apState ^. diedQueue))
+    (Right <$> stoppedWithExceptionSTM (apState ^. diedQueue))
 
-alertOnNeedRunning :: TMVar (Jobs b) -> STM (Jobs b)
-alertOnNeedRunning = takeTMVar
+needRunningSTM :: TMVar (Jobs b) -> STM (Jobs b)
+needRunningSTM = takeTMVar
 
-alertOnStoppedWithException :: TBQueue b -> STM b
-alertOnStoppedWithException = readTBQueue
+stoppedWithExceptionSTM :: TBQueue b -> STM b
+stoppedWithExceptionSTM = readTBQueue
 
 -- Things Reid wishes were in Control.Concurrent.Async ***********************
 ------------------------------------------------------------------------------

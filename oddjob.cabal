@@ -1,25 +1,26 @@
 name:                oddjob
 version:             0.1.0.0
-synopsis:            Initial project template from stack
+synopsis:            A collection of worker services.
 description:         Please see README.md
-homepage:            http://github.com/githubuser/oddjob#readme
-license:             BSD3
+homepage:            http://github.com/helium/oddjob#readme
+license:             MIT
 license-file:        LICENSE
-author:              Author name here
-maintainer:          example@example.com
-copyright:           2010 Author Here
+author:              Reid Draper
+maintainer:          reid@helium.com
+copyright:           2015 Helium
 category:            Web
 build-type:          Simple
--- extra-source-files:
 cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Lib
+  ghc-options: -Wall
+  exposed-modules:     Data.Oddjob.Worker
   build-depends:       base >= 4.7 && < 5
                      , async
                      , containers
                      , microlens
+                     , microlens-mtl
                      , mtl
                      , stm
                      , transformers
@@ -28,9 +29,10 @@ library
 executable oddjob-exe
   hs-source-dirs:      app
   main-is:             Main.hs
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , oddjob
+                     , containers
   default-language:    Haskell2010
 
 test-suite oddjob-test
@@ -39,7 +41,7 @@ test-suite oddjob-test
   main-is:             Spec.hs
   build-depends:       base
                      , oddjob
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
 source-repository head
