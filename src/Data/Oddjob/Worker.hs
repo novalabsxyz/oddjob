@@ -116,9 +116,7 @@ updateRunningState needRunning = do
     let currentlyRunning = Set.fromList (Map.keys wMap)
         noLongerNeeded = currentlyRunning \\ needRunning
         notRunning = needRunning \\ currentlyRunning
-    liftIO (putStrLn ("cancelling: " <> show (Set.size noLongerNeeded)))
     mapM_ cancelJob noLongerNeeded
-    liftIO (putStrLn ("starting: " <> show (Set.size notRunning)))
     mapM_ controlJob notRunning
 
 workerServiceLoop :: Ord b => WS b ()
