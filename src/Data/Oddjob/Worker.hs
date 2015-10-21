@@ -48,7 +48,7 @@ inputVar = lens _inputVar (\s n -> s { _inputVar = n })
 data WorkerState b = WorkerState
     { _workerMap :: WorkerMap b
     , _updateVar:: TMVar (Jobs b)
-    , _diedQueue :: TBQueue b
+    , _diedQueue :: TBQueue (SomeException, b)
     , _runJob :: b -> IO ()
     , _self :: Async ()
     }
@@ -59,7 +59,7 @@ workerMap = lens _workerMap (\s n -> s { _workerMap = n })
 updateVar :: Lens' (WorkerState b) (TMVar (Jobs b))
 updateVar = lens _updateVar (\s n -> s { _updateVar = n })
 
-diedQueue :: Lens' (WorkerState b) (TBQueue b)
+diedQueue :: Lens' (WorkerState b) (TBQueue (SomeException, b))
 diedQueue = lens _diedQueue (\s n -> s { _diedQueue = n })
 
 runJob :: Lens' (WorkerState b) (b -> IO ())
@@ -99,7 +99,8 @@ controlJob job = do
     diedQ <- use diedQueue
     worker <- liftIO (asyncFinally
                         (jobFn job)
-                        (atomically (writeTBQueue diedQ job)))
+                        (\e ->
+                            atomically (writeTBQueue diedQ (e, job))))
     me <- use self
     liftIO (linkChildToParent me worker)
     workerMap %= Map.insert job worker
@@ -125,18 +126,18 @@ workerServiceLoop = forever $ do
     case reasonToWakeUp of
         (Left needRunning) ->
             updateRunningState needRunning
-        (Right job) -> do
+        (Right (exception, job)) -> do
             wMap <- use workerMap
             -- Only restart the worker if we're actually suppoed to be
             -- running it.
             when (Map.member job wMap) $ do
-                liftIO (putStrLn "restarting stopped process")
+                liftIO (putStrLn ("restarting stopped process because of exception: " <> show exception))
                 -- this results in an unneeded Async.cancel, but it keeps the code
                 -- nice and clean, and it's innocuous
                 cancelJob job
                 controlJob job
 
-wakeupSTM :: WorkerState b -> STM (Either (Jobs b) b)
+wakeupSTM :: WorkerState b -> STM (Either (Jobs b) (SomeException, b))
 wakeupSTM apState =
     -- TODO should we swap the order of these?
     (Left <$> needRunningSTM (apState ^. updateVar))
@@ -167,10 +168,13 @@ linkChildToParent parent child =
             (Left e) -> cancelWith child e
             _ -> return ()
 
-asyncFinally :: IO a -> IO b -> IO (Async a)
+asyncFinally :: IO a -> (SomeException -> IO b) -> IO (Async a)
 asyncFinally action handler =
+    let finallyE io what = io `catch` \e ->
+                                what e >> throwIO (e :: SomeException)
+    in
     mask $ \restore ->
-        async (restore action `finally` handler)
+        async (restore action `finallyE` handler)
 
 -- From Control.Concurrent.Async internals
 --
