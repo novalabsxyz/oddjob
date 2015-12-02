@@ -128,7 +128,7 @@ workerServiceLoop = forever $ do
             updateRunningState needRunning
         (Right (exception, job)) -> do
             wMap <- use workerMap
-            -- Only restart the worker if we're actually suppoed to be
+            -- Only restart the worker if we're actually supposed to be
             -- running it.
             when (Map.member job wMap) $ do
                 liftIO (putStrLn ("restarting stopped process because of exception: " <> show exception))
