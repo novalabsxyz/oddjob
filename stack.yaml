@@ -4,4 +4,4 @@ packages:
 extra-deps:
     - microlens-0.3.4.1
     - microlens-mtl-0.1.5.0
-resolver: lts-2.17
+resolver: lts-5.0
