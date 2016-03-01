@@ -1,6 +1,7 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (poll)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Monad (forever, forM_)
 import Data.Monoid ((<>))
@@ -28,14 +29,19 @@ oneSecond = 1000000
 main :: IO ()
 main = do
     lock <- newMVar ()
-    service <- startWorkerService (worker lock)
+    service <- startWorkerService (worker lock) (Just print)
     let jobsOverTime = map fromList [ [1..2]
                                     , [1..3]
                                     , [2..3]
                                     , [1..4]
+                                    , [1..5]
+                                    , [2..5]
+                                    , [1..6]
                                     ]
     forM_ jobsOverTime $ \j -> do
         lockedPutStrLn lock ("Settings new jobs: " <> show (toList j))
         setJobs service j
         threadDelay oneSecond
     threadDelay (2 * oneSecond)
+    getState service >>= print
+    poll (_asyncHandle service) >>= print
