@@ -12,6 +12,7 @@ module Data.Oddjob.Worker
     , startWorkerService
     , stopWorkerService
     , setJobs
+    , setJobsSTM
     , getState
     ) where
 
@@ -127,7 +128,10 @@ stopWorkerService :: WorkerService a -> IO ()
 stopWorkerService service = cancel (service ^. asyncHandle)
 
 setJobs :: Ord b => WorkerService b -> Jobs b -> IO ()
-setJobs service jobs = atomically (putTMVar (service ^. inputVar) jobs)
+setJobs service jobs = atomically (setJobsSTM service jobs)
+
+setJobsSTM :: Ord b => WorkerService b -> Jobs b -> STM ()
+setJobsSTM service jobs = putTMVar (service ^. inputVar) jobs
 
 getState :: Ord b => WorkerService b -> IO (WorkerServiceState b)
 getState service = do
